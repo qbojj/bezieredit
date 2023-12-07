@@ -9,6 +9,12 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
+#include <rapidjson/document.h>
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/istreamwrapper.h>
+#include <rapidjson/ostreamwrapper.h>
+#include <rapidjson/error/en.h>
+
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,6 +26,8 @@
 #include <functional>
 #include <memory>
 #include <list>
+#include <iostream>
+#include <fstream>
 
 class Shader
 {
@@ -261,8 +269,7 @@ struct control_point
 {
     const glm::vec2 &get() const { return control_points_t::get().get(id); }
     glm::vec2 &get() { return control_points_t::get().get(id); }
-    operator glm::vec2 &() { return get(); }
-    operator const glm::vec2 &() const { return get(); }
+    operator glm::vec2() const { return get(); }
 
     control_point(const glm::vec2 &pos) : id(control_points_t::get().add_point(pos)) {}
     control_point(const control_point &other) : id(control_points_t::get().add_ref(other.id)) {}
@@ -407,6 +414,13 @@ public:
 
         Toggle("Show lines", show_lines);
         Toggle("Show points", show_points);
+
+        ImGui::InputText("File path: ", text, 1024);
+        if (ImGui::Button("Save"))
+            save_to_file(text);
+        ImGui::SameLine();
+        if (ImGui::Button("Load"))
+            load_from_file(text);
 
         ImGui::End();
 
@@ -576,19 +590,20 @@ public:
         {
             if (selected_point.get_id() != -1)
             {
-                for (auto it = beziers.begin(); it != beziers.end(); it++)
+                auto has_point = [&](const cubic_bezier &b)
                 {
-                    bool found;
-                    do
-                    {
-                        found = false;
-                        for (auto &c : *it)
-                            if (c == selected_point)
-                                found = true;
+                    for (auto &c : b)
+                        if (c == selected_point)
+                            return true;
+                    return false;
+                };
 
-                        if (found)
-                            it = beziers.erase(it);
-                    } while (found && it != beziers.end());
+                auto it = beziers.begin();
+                while (it != beziers.end())
+                {
+                    it = std::find_if(it, beziers.end(), has_point);
+                    if (it != beziers.end())
+                        it = beziers.erase(it);
                 }
 
                 selected_point = control_point::invalid();
@@ -606,6 +621,8 @@ private:
 
     bool dragging_point = false;
     control_point selected_point = control_point::invalid();
+
+    char text[1024];
 
     glm::vec2 center{0.f, 0.f};
     float scale = 1.0f;
@@ -722,6 +739,141 @@ private:
         glm::vec2 screen = (world - center) * scale + glm::vec2{screen_size.x / 2.f, screen_size.y / 2.f};
         return {screen.x, screen.y};
     }
+
+    void save_to_file(const char *filename) const
+    {
+        using namespace rapidjson;
+
+        Document d;
+        auto &allocator = d.GetAllocator();
+
+        Value jnodes;
+        Value jbeziers;
+        Value jchains;
+
+        jnodes.SetArray();
+        jbeziers.SetArray();
+        jchains.SetArray();
+
+        std::unordered_map<int, int> id_map;
+        int next_id = 0;
+
+        auto add_to_id_map = [&](int id, glm::vec2 &pos)
+        {
+            auto [it, inserted] = id_map.insert({id, next_id++});
+            assert(inserted);
+
+            Value jnode;
+            jnode.SetArray();
+            jnode.PushBack(pos.x, allocator).PushBack(pos.y, allocator);
+
+            jnodes.PushBack(jnode, allocator);
+        };
+
+        auto &cpts = control_points_t::get();
+
+        cpts.for_all(add_to_id_map);
+
+        for (const auto &b : beziers)
+        {
+            Value jbezier;
+            jbezier.SetArray();
+            for (const auto &p : b)
+                jbezier.PushBack(id_map[p.get_id()], allocator);
+
+            jbeziers.PushBack(jbezier, allocator);
+        }
+
+        for (const auto [c, p1, p2] : chains)
+        {
+            if (cpts.is_valid(c) && cpts.is_valid(p1) && cpts.is_valid(p2))
+            {
+                Value jchain;
+                jchain.SetArray()
+                    .PushBack(id_map[c], allocator)
+                    .PushBack(id_map[p1], allocator)
+                    .PushBack(id_map[p2], allocator);
+
+                jchains.PushBack(
+                    jchain,
+                    allocator);
+            }
+        }
+
+        d.SetObject();
+        d.AddMember("nodes", jnodes, allocator);
+        d.AddMember("beziers", jbeziers, allocator);
+        d.AddMember("chains", jchains, allocator);
+
+        std::ofstream f(filename);
+        OStreamWrapper wrapper(f);
+        PrettyWriter writer(wrapper);
+        d.Accept(writer);
+    }
+
+    void load_from_file(const char *filename)
+    {
+        using namespace rapidjson;
+        Document d;
+        {
+            std::ifstream f(filename);
+            IStreamWrapper wrapper(f);
+            d.ParseStream(wrapper);
+        }
+
+        if (d.HasParseError())
+        {
+            printf("%s\n", GetParseError_En(d.GetParseError()));
+            return;
+        }
+
+        if (!d.IsObject() ||
+            !d.HasMember("nodes") || !d.HasMember("beziers") || !d.HasMember("chains") ||
+            !d["nodes"].IsArray() || !d["beziers"].IsArray() || !d["chains"].IsArray())
+        {
+            printf("invalid format\n");
+            return;
+        }
+
+        beziers.clear();
+        chains.clear();
+        selected_point = control_point::invalid();
+        auto &cpts = control_points_t::get();
+        cpts.for_all([](int, glm::vec2 &)
+                     { assert(false); });
+
+        std::unordered_map<int, control_point> id_map;
+
+        const Value &jnodes = d["nodes"];
+        const Value &jbeziers = d["beziers"];
+        const Value &jchains = d["chains"];
+
+        for (int i = 0; i < jnodes.Size(); i++)
+        {
+            const Value &jnode = jnodes[i];
+
+            control_point cp(glm::vec2{jnode[0].GetFloat(), jnode[1].GetFloat()});
+            bool inserted = id_map.insert(std::pair{i, cp}).second;
+            assert(inserted);
+        }
+
+        for (int i = 0; i < jbeziers.Size(); i++)
+        {
+            const Value &jbezier = jbeziers[i];
+            beziers.push_back({id_map.at(jbezier[0].GetInt()),
+                               id_map.at(jbezier[1].GetInt()),
+                               id_map.at(jbezier[2].GetInt()),
+                               id_map.at(jbezier[3].GetInt())});
+        }
+
+        for (int i = 0; i < jchains.Size(); i++)
+        {
+            const Value &jchain = jchains[i];
+            chains.push_back({id_map.at(jchain[0].GetInt()).get_id(),
+                              id_map.at(jchain[1].GetInt()).get_id(),
+                              id_map.at(jchain[2].GetInt()).get_id()});
+        }
+    }
 };
 
 int main(int argc, char **argv)
@@ -732,6 +884,7 @@ int main(int argc, char **argv)
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_SAMPLES, 4);
 
     GLFWwindow *window = glfwCreateWindow(800, 600, "Bezier", NULL, NULL);
     if (!window)

@@ -5,6 +5,7 @@ set(OpenGL_GL_PREFERENCE GLVND)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 find_package(OpenGL REQUIRED)
+find_package(RapidJSON REQUIRED)
 
 set(IMGUI_PATH ${CMAKE_CURRENT_SOURCE_DIR}/imgui)
 file(GLOB IMGUI_SOURCES ${IMGUI_PATH}/*.cpp)
@@ -17,5 +18,6 @@ target_include_directories(glad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(bezieredit bezieredit.cpp)
 target_link_libraries(bezieredit glm::glm glfw glad imgui OpenGL::GL)
-target_include_directories(bezieredit PRIVATE ${IMGUI_PATH} .)
+target_include_directories(bezieredit PRIVATE ${IMGUI_PATH} .
+                                              ${RapidJSON_INCLUDE_PATH})
 target_compile_features(bezieredit PRIVATE cxx_std_17)
