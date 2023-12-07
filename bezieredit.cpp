@@ -10,7 +10,7 @@
 #include <backends/imgui_impl_opengl3.h>
 
 #include <rapidjson/document.h>
-#include <rapidjson/prettywriter.h>
+#include <rapidjson/writer.h>
 #include <rapidjson/istreamwrapper.h>
 #include <rapidjson/ostreamwrapper.h>
 #include <rapidjson/error/en.h>
@@ -807,7 +807,7 @@ private:
 
         std::ofstream f(filename);
         OStreamWrapper wrapper(f);
-        PrettyWriter writer(wrapper);
+        Writer writer(wrapper);
         d.Accept(writer);
     }
 
