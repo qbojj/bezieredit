@@ -112,28 +112,31 @@ public:
         glDeleteVertexArrays(1, &vao);
     }
 
-    void draw(const glm::vec2 &p0, const glm::vec2 &p1, const glm::vec2 &p2, const glm::vec2 &p3, int subdivision, ImU32 color)
+    void draw(const std::vector<glm::vec2> &control_points, int subdivision, ImU32 color)
     {
         use();
 
         glUniformMatrix4fv(0, 1, GL_FALSE, &MVP[0][0]);
 
-        float data[4][2]{
-            {p0.x, p0.y},
-            {p1.x, p1.y},
-            {p2.x, p2.y},
-            {p3.x, p3.y},
-        };
-        glUniform2fv(4, 4, &data[0][0]);
-
-        glUniform4f(8, (color & 0xff) / 255.0f,
+        glUniform4f(6, (color & 0xff) / 255.0f,
                     ((color >> 8) & 0xff) / 255.0f,
                     ((color >> 16) & 0xff) / 255.0f,
                     ((color >> 24) & 0xff) / 255.0f);
-        glUniform1i(9, subdivision);
+        glUniform1i(4, subdivision);
+
+        static_assert(sizeof(glm::vec2) == sizeof(float) * 2);
+        assert(control_points.size() <= get_max_control_potins());
+
+        glUniform1i(5, (GLint)control_points.size());
+        glUniform2fv(7, (GLsizei)control_points.size(), &control_points[0][0]);
 
         glBindVertexArray(vao);
         glDrawArrays(GL_LINE_STRIP, 0, subdivision);
+    }
+
+    GLint get_max_control_potins() const
+    {
+        return 128;
     }
 
     glm::mat4 MVP;
@@ -152,17 +155,48 @@ private:
 #extension GL_ARB_explicit_uniform_location : require
 
 layout(location = 0) uniform mat4 MVP;
-layout(location = 4) uniform vec2 control_points[4];
-layout(location = 9) uniform int subdivision;
+layout(location = 4) uniform int subdivision;
+layout(location = 5) uniform int control_points_count;
+layout(location = 7) uniform vec2 control_points[128];
 
 void main() {
     float t = float(gl_VertexID) / (subdivision - 1);
-    float t1 = 1 - t;
-    vec2 pos = (t * t * t) * control_points[0] +
-                (3 * t1 * t * t) * control_points[1] +
-                (3 * t1 * t1 * t) * control_points[2] +
-                (t1 * t1 * t1) * control_points[3];
+    const int n = control_points_count - 1;
+
+    /*
+    vec2 pos = vec2(0.0f, 0.0f);
+
+    vec2 pts[control_points.length()];
+    if (t < 0.5) {
+        for(int i = 0; i <= n; i++)
+            pts[i] = control_points[i];
+    } else {
+        t = 1 - t;
+        for(int i = 0; i <= n; i++)
+            pts[i] = control_points[n - i];
+    }
+
+    const float t_t1 = t / (1 - t);
+    float mult = pow(1 - t, float(n));
+    for(int i = 0; i <= n; i++)
+    {
+        pos += pts[i] * mult;
+        mult *= t_t1 * float(n - i) / (i + 1);
+    }
+    */
     
+    vec2 pos_s[control_points.length()];
+    for(int i = 0; i < control_points_count; i++)
+        pos_s[i] = control_points[i];
+    
+    for(int i = 0; i < n; i++)
+    {
+        for(int j = 0; j < n - i; j++)
+            pos_s[j] = pos_s[j] * (1 - t) + pos_s[j + 1] * t;
+    }
+
+    vec2 pos = pos_s[0];
+
     gl_Position = MVP * vec4(pos, 0.0f, 1.0f);
 })";
 
@@ -170,7 +204,7 @@ void main() {
 #version 420
 #extension GL_ARB_explicit_uniform_location : require
 
-layout(location = 8) uniform vec4 color;
+layout(location = 6) uniform vec4 color;
 layout(location = 0) out vec4 frag_color;
 
 void main() {
@@ -309,7 +343,7 @@ private:
 };
 
 /////////// Bezier /////////////////
-using cubic_bezier = std::array<control_point, 4>;
+using bezier = std::vector<control_point>;
 
 ///////////// APPLICATION //////////////
 class App
@@ -400,7 +434,11 @@ public:
 
         ImGui::Begin("Bezier");
 
+        ImGui::InputInt("Bezier degree", &bezier_degree);
+        bezier_degree = std::max(1, std::min(BezierShader::get().get_max_control_potins() - 1, bezier_degree));
+
         ImGui::InputInt("Subdivisions", &subdivision);
+        subdivision = std::max(1, std::min(100000, subdivision));
 
         auto Toggle = [](const char *msg, bool &b)
         {
@@ -421,6 +459,8 @@ public:
         ImGui::SameLine();
         if (ImGui::Button("Load"))
             load_from_file(text);
+
+        ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 
         ImGui::End();
 
@@ -468,6 +508,9 @@ public:
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             if (dist * scale < 6.f)
             {
+                if (selected_point != closest)
+                    was_last_action_add_end_freestanding = false;
+
                 selected_point = closest;
                 dragging_point = true;
             }
@@ -482,7 +525,7 @@ public:
             if (dragging_point)
             {
                 selected_point.get() += delta;
-                update_constraints(selected_point.get_id(), delta);
+                update_constraints(selected_point, delta);
             }
             else
                 center -= delta;
@@ -496,14 +539,35 @@ public:
                 dist * scale < 6.f ? closest
                                    : control_point(mouse_pos);
 
-            if (selected_point.get_id() != -1 &&
-                get_node_of(selected_point) == selected_point &&
-                get_node_of(p_end) == p_end &&
-                selected_point != p_end)
+            if (ImGui::IsKeyDown(ImGuiKey_ModCtrl) && was_last_action_add_end_freestanding)
             {
+                if (is_endpoint(p_end) &&
+                    selected_point != p_end)
+                {
+                    bezier b = beziers.back();
+                    assert(b.back() == selected_point);
 
-                add_bezier(selected_point, p_end);
-                selected_point = p_end;
+                    if (b.size() < BezierShader::get().get_max_control_potins())
+                    {
+                        was_last_action_add_end_freestanding = is_freestanding(p_end);
+
+                        b.push_back(p_end);
+                        beziers.back() = b;
+                        selected_point = p_end;
+                    }
+                }
+            }
+            else
+            {
+                if (is_endpoint(selected_point) &&
+                    is_endpoint(p_end) &&
+                    selected_point != p_end)
+                {
+                    was_last_action_add_end_freestanding = is_freestanding(p_end);
+
+                    add_bezier(selected_point, p_end);
+                    selected_point = p_end;
+                }
             }
         }
 
@@ -523,10 +587,16 @@ public:
 
         if (ImGui::IsKeyPressed(ImGuiKey::ImGuiKey_Escape))
             if (!dragging_point)
+            {
                 selected_point = control_point::invalid();
+                was_last_action_add_end_freestanding = false;
+            }
 
         if (ImGui::IsKeyPressed(ImGuiKey::ImGuiKey_N))
+        {
             selected_point = control_point(mouse_pos);
+            was_last_action_add_end_freestanding = false;
+        }
 
         if (ImGui::IsKeyPressed(ImGuiKey::ImGuiKey_Equal))
             scale *= 1.1f;
@@ -537,8 +607,8 @@ public:
         // link
         if (ImGui::IsKeyPressed(ImGuiKey::ImGuiKey_L))
         {
-            control_point node_c = get_node_of(closest);
-            control_point node_s = get_node_of(selected_point);
+            control_point node_c = get_node_of_derivative_cp(closest);
+            control_point node_s = get_node_of_derivative_cp(selected_point);
 
             if (dist * scale < 6.f &&
                 closest != selected_point &&
@@ -546,6 +616,8 @@ public:
                 node_s != selected_point &&
                 node_c == node_s)
             {
+                was_last_action_add_end_freestanding = false;
+
                 int c = node_c.get_id();
                 int p1 = selected_point.get_id();
                 int p2 = closest.get_id();
@@ -566,8 +638,8 @@ public:
         // unlink
         if (ImGui::IsKeyPressed(ImGuiKey_U))
         {
-            control_point node_c = get_node_of(closest);
-            control_point node_s = get_node_of(selected_point);
+            control_point node_c = get_node_of_derivative_cp(closest);
+            control_point node_s = get_node_of_derivative_cp(selected_point);
 
             if (dist * scale < 6.f &&
                 closest != selected_point &&
@@ -575,6 +647,8 @@ public:
                 node_s != selected_point &&
                 node_c == node_s)
             {
+                was_last_action_add_end_freestanding = false;
+
                 int c = node_c.get_id();
                 int p1 = selected_point.get_id();
                 int p2 = closest.get_id();
@@ -590,7 +664,9 @@ public:
         {
             if (selected_point.get_id() != -1)
             {
-                auto has_point = [&](const cubic_bezier &b)
+                was_last_action_add_end_freestanding = false;
+
+                auto has_point = [&](const bezier &b)
                 {
                     for (auto &c : b)
                         if (c == selected_point)
@@ -598,13 +674,15 @@ public:
                     return false;
                 };
 
-                auto it = beziers.begin();
-                while (it != beziers.end())
+                beziers.remove_if(has_point);
+
+                auto chain_contains_id = [id = selected_point.get_id()](const std::tuple<int, int, int> &t)
                 {
-                    it = std::find_if(it, beziers.end(), has_point);
-                    if (it != beziers.end())
-                        it = beziers.erase(it);
-                }
+                    auto [c, p1, p2] = t;
+                    return c == id || p1 == id || p2 == id;
+                };
+
+                chains.remove_if(chain_contains_id);
 
                 selected_point = control_point::invalid();
             }
@@ -614,15 +692,19 @@ public:
 private:
     bool show_lines = true;
     bool show_points = true;
-    int subdivision = 100;
+    int subdivision = 1000;
 
-    std::list<cubic_bezier> beziers;             // bezier
+    bool was_last_action_add_end_freestanding = false;
+
+    int bezier_degree = 3;
+
+    std::list<bezier> beziers;                   // bezier
     std::list<std::tuple<int, int, int>> chains; // id-id-id
 
     bool dragging_point = false;
     control_point selected_point = control_point::invalid();
 
-    char text[1024];
+    char text[1024] = "";
 
     glm::vec2 center{0.f, 0.f};
     float scale = 1.0f;
@@ -634,22 +716,38 @@ private:
         glViewport(0, 0, screen.x, screen.y);
     }
 
-    control_point get_node_of(control_point cp)
+    bool is_freestanding(control_point cp) const
     {
-        int id = cp.get_id();
+        if (cp == control_point::invalid())
+            return false;
 
-        for (auto &bezier : beziers)
-        {
-            if (bezier[0].get_id() == id ||
-                bezier[1].get_id() == id)
-                return bezier[0];
+        // is freestanding point (not used in any bezier)
+        return beziers.end() == std::find_if(beziers.begin(), beziers.end(), [&](const bezier &b)
+                                             { return std::find(b.begin(), b.end(), cp) != b.end(); });
+    }
 
-            if (bezier[2].get_id() == id ||
-                bezier[3].get_id() == id)
-                return bezier[3];
-        }
+    bool is_endpoint(control_point cp) const
+    {
+        if (cp == control_point::invalid())
+            return false;
 
-        return cp;
+        // is endpoint of any bezier
+        return beziers.end() != std::find_if(beziers.begin(), beziers.end(), [&](const bezier &b)
+                                             { return b.front() == cp || b.back() == cp; }) ||
+               is_freestanding(cp);
+    }
+
+    control_point get_node_of_derivative_cp(control_point cp) // for derivatives
+    {
+        auto b = std::find_if(beziers.begin(), beziers.end(), [&](const bezier &b)
+                              { return b.size() >= 4 &&
+                                       (b[1] == cp ||
+                                        b[b.size() - 2] == cp); });
+
+        if (b == beziers.end())
+            return control_point::invalid();
+
+        return (*b)[1] == cp ? b->front() : b->back();
     }
 
     std::pair<control_point, float> get_closest_point(glm::vec2 world)
@@ -660,47 +758,52 @@ private:
 
     void draw_beziers()
     {
-        for (auto &b : beziers)
+        for (const auto &b : beziers)
         {
-            glm::vec2 p0 = b[0];
-            glm::vec2 p1 = b[1];
-            glm::vec2 p2 = b[2];
-            glm::vec2 p3 = b[3];
-
             auto color = IM_COL32(255, 255, 255, 255);
 
-            BezierShader::get().draw(p0, p1, p2, p3, subdivision, color);
+            std::vector<glm::vec2> points(b.begin(), b.end());
+            BezierShader::get().draw(points, subdivision, color);
 
             if (show_lines)
             {
                 auto *drawList = ImGui::GetBackgroundDrawList();
-                drawList->AddLine(to_screen(p0), to_screen(p1), color);
-                drawList->AddLine(to_screen(p2), to_screen(p3), color);
+                drawList->AddLine(to_screen(points[0]), to_screen(points[1]), color);
+                drawList->AddLine(to_screen(points[points.size() - 2]), to_screen(points.back()), color);
             }
         }
     }
 
-    void add_bezier(control_point p0, control_point p3)
+    void add_bezier(control_point start, control_point end)
     {
-        beziers.push_back({
-            p0,
-            control_point(p0.get() + (p3.get() - p0.get()) / 3.f),
-            control_point(p0.get() + (p3.get() - p0.get()) * 2.f / 3.f),
-            p3,
-        });
+        bezier points;
+        points.push_back(start);
+
+        const glm::vec2 s_pos = start.get();
+        const glm::vec2 e_pos = end.get();
+        const glm::vec2 step = (e_pos - s_pos) / (float)bezier_degree;
+
+        for (int i = 1; i < bezier_degree; i++)
+            points.push_back(control_point(s_pos + step * (float)i));
+        points.push_back(end);
+
+        beziers.push_back(std::move(points));
     }
 
-    void update_constraints(int id, glm::vec2 delta)
+    void update_constraints(control_point id, glm::vec2 delta)
     {
         for (auto &bezier : beziers)
         {
-            if (bezier[0].get_id() == id)
+            if (bezier.size() <= 3)
+                continue;
+
+            if (bezier.front() == id)
                 bezier[1].get() += delta;
-            if (bezier[3].get_id() == id)
-                bezier[2].get() += delta;
+            if (bezier.back() == id)
+                bezier[bezier.size() - 2].get() += delta;
         }
 
-        for (auto &[common, p1, p2] : chains)
+        for (auto [common, p1, p2] : chains)
         {
             auto &pts = control_points_t::get();
 
@@ -708,14 +811,17 @@ private:
                 !pts.is_valid(p1) ||
                 !pts.is_valid(p2))
             {
-                assert(false);
                 continue;
             }
 
-            if (p1 == id)
-                pts.get(p2) -= delta;
-            if (p2 == id)
-                pts.get(p1) -= delta;
+            control_point cp_common = control_point::from_id(common);
+            control_point cp_p1 = control_point::from_id(p1);
+            control_point cp_p2 = control_point::from_id(p2);
+
+            if (cp_p1 == id)
+                cp_p2.get() = 2.f * cp_common.get() - cp_p1.get();
+            if (cp_p2 == id)
+                cp_p1.get() = 2.f * cp_common.get() - cp_p2.get();
         }
     }
 
@@ -747,13 +853,9 @@ private:
         Document d;
         auto &allocator = d.GetAllocator();
 
-        Value jnodes;
-        Value jbeziers;
-        Value jchains;
-
-        jnodes.SetArray();
-        jbeziers.SetArray();
-        jchains.SetArray();
+        Value jnodes(kArrayType);
+        Value jbeziers(kArrayType);
+        Value jchains(kArrayType);
 
         std::unordered_map<int, int> id_map;
         int next_id = 0;
@@ -763,8 +865,7 @@ private:
             auto [it, inserted] = id_map.insert({id, next_id++});
             assert(inserted);
 
-            Value jnode;
-            jnode.SetArray();
+            Value jnode(kArrayType);
             jnode.PushBack(pos.x, allocator).PushBack(pos.y, allocator);
 
             jnodes.PushBack(jnode, allocator);
@@ -776,8 +877,7 @@ private:
 
         for (const auto &b : beziers)
         {
-            Value jbezier;
-            jbezier.SetArray();
+            Value jbezier(kArrayType);
             for (const auto &p : b)
                 jbezier.PushBack(id_map[p.get_id()], allocator);
 
@@ -788,8 +888,8 @@ private:
         {
             if (cpts.is_valid(c) && cpts.is_valid(p1) && cpts.is_valid(p2))
             {
-                Value jchain;
-                jchain.SetArray()
+                Value jchain(kArrayType);
+                jchain
                     .PushBack(id_map[c], allocator)
                     .PushBack(id_map[p1], allocator)
                     .PushBack(id_map[p2], allocator);
@@ -800,10 +900,10 @@ private:
             }
         }
 
-        d.SetObject();
-        d.AddMember("nodes", jnodes, allocator);
-        d.AddMember("beziers", jbeziers, allocator);
-        d.AddMember("chains", jchains, allocator);
+        d.SetObject()
+            .AddMember("nodes", jnodes, allocator)
+            .AddMember("beziers", jbeziers, allocator)
+            .AddMember("chains", jchains, allocator);
 
         std::ofstream f(filename);
         OStreamWrapper wrapper(f);
@@ -852,6 +952,12 @@ private:
         {
             const Value &jnode = jnodes[i];
 
+            if (!jnode.IsArray() || jnode.Size() != 2)
+            {
+                printf("invalid format\n");
+                return;
+            }
+
             control_point cp(glm::vec2{jnode[0].GetFloat(), jnode[1].GetFloat()});
             bool inserted = id_map.insert(std::pair{i, cp}).second;
             assert(inserted);
@@ -860,18 +966,51 @@ private:
         for (int i = 0; i < jbeziers.Size(); i++)
         {
             const Value &jbezier = jbeziers[i];
-            beziers.push_back({id_map.at(jbezier[0].GetInt()),
-                               id_map.at(jbezier[1].GetInt()),
-                               id_map.at(jbezier[2].GetInt()),
-                               id_map.at(jbezier[3].GetInt())});
+            if (!jbezier.IsArray() || jbezier.Size() < 2)
+            {
+                printf("invalid format\n");
+                return;
+            }
+
+            bezier b;
+            for (int j = 0; j < jbezier.Size(); j++)
+            {
+                int id = jbezier[j].GetInt();
+                auto it = id_map.find(id);
+                if (it == id_map.end())
+                {
+                    printf("invalid format\n");
+                    return;
+                }
+                b.push_back(it->second);
+            }
+            beziers.push_back(std::move(b));
         }
 
         for (int i = 0; i < jchains.Size(); i++)
         {
             const Value &jchain = jchains[i];
-            chains.push_back({id_map.at(jchain[0].GetInt()).get_id(),
-                              id_map.at(jchain[1].GetInt()).get_id(),
-                              id_map.at(jchain[2].GetInt()).get_id()});
+            if (!jchain.IsArray() || jchain.Size() != 3)
+            {
+                printf("invalid format\n");
+                return;
+            }
+
+            int c = jchain[0].GetInt();
+            int p1 = jchain[1].GetInt();
+            int p2 = jchain[2].GetInt();
+
+            auto it_c = id_map.find(c);
+            auto it_p1 = id_map.find(p1);
+            auto it_p2 = id_map.find(p2);
+
+            if (it_c == id_map.end() || it_p1 == id_map.end() || it_p2 == id_map.end())
+            {
+                printf("invalid format\n");
+                return;
+            }
+
+            chains.push_back({it_c->second.get_id(), it_p1->second.get_id(), it_p2->second.get_id()});
         }
     }
 };
