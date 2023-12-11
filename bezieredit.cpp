@@ -17,6 +17,7 @@
 
 #include <vector>
 #include <unordered_map>
+#include <map>
 #include <unordered_set>
 #include <stdexcept>
 #include <array>
@@ -460,6 +461,46 @@ public:
         if (ImGui::Button("Load"))
             load_from_file(text);
 
+        if (ImGui::Button("Rotate"))
+        {
+            auto &cpts = control_points_t::get();
+            cpts.for_all([&](int, glm::vec2 &p)
+                         { glm::vec2 rel = p - center;
+                            p = glm::vec2(rel.y, -rel.x) + center; });
+        }
+
+        if (ImGui::Button("Clear"))
+            clear();
+
+        ImGui::Text("Beziers: %zu", beziers.size());
+        ImGui::Text("Chains: %zu", chains.size());
+
+        if (ImGui::BeginTable("Bezier sizes", 2))
+        {
+
+            std::map<size_t, size_t> sizes;
+            for (const auto &b : beziers)
+            {
+                sizes.insert({b.size(), 0});
+                sizes[b.size()]++;
+            }
+
+            ImGui::TableSetupColumn("Size");
+            ImGui::TableSetupColumn("Count");
+
+            ImGui::TableHeadersRow();
+            for (auto [size, count] : sizes)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%zu", size);
+                ImGui::TableNextColumn();
+                ImGui::Text("%zu", count);
+            }
+
+            ImGui::EndTable();
+        }
+
         ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 
         ImGui::End();
@@ -709,6 +750,20 @@ private:
     glm::vec2 center{0.f, 0.f};
     float scale = 1.0f;
 
+    void clear()
+    {
+        beziers.clear();
+        chains.clear();
+        selected_point = control_point::invalid();
+        auto &cpts = control_points_t::get();
+        cpts.for_all([](int, glm::vec2 &)
+                     { assert(false); });
+
+        dragging_point = false;
+        center = {0.f, 0.f};
+        scale = 1.0f;
+    }
+
     void update_size()
     {
         ImGuiIO &io = ImGui::GetIO();
@@ -935,12 +990,7 @@ private:
             return;
         }
 
-        beziers.clear();
-        chains.clear();
-        selected_point = control_point::invalid();
-        auto &cpts = control_points_t::get();
-        cpts.for_all([](int, glm::vec2 &)
-                     { assert(false); });
+        clear();
 
         std::unordered_map<int, control_point> id_map;
 
