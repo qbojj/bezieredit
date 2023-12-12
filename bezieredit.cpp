@@ -501,6 +501,9 @@ public:
             ImGui::EndTable();
         }
 
+        if (selected_point != control_point::invalid())
+            ImGui::Text("Selected point pos: %lf %lf", selected_point.get().x, selected_point.get().y);
+
         ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 
         ImGui::End();
@@ -748,7 +751,7 @@ private:
     char text[1024] = "";
 
     glm::vec2 center{0.f, 0.f};
-    float scale = 1.0f;
+    float scale = 1.0f; // px / unit
 
     void clear()
     {
@@ -880,25 +883,38 @@ private:
         }
     }
 
+    static glm::vec2 to_glm(ImVec2 v)
+    {
+        return glm::vec2{v.x, v.y};
+    }
+
+    static ImVec2 to_im(glm::vec2 v)
+    {
+        return ImVec2{v.x, v.y};
+    }
+
     glm::mat4 get_P() const
     {
-        ImGuiIO &io = ImGui::GetIO();
-        ImVec2 screen = io.DisplaySize;
-        return glm::ortho(-screen.x / 2 * scale + center.x, screen.x / 2 * scale + center.x,
-                          screen.y / 2 * scale + center.y, -screen.y / 2 * scale + center.y);
+        // -y -> up
+        // +x -> right
+
+        glm::vec2 ssize = to_glm(ImGui::GetIO().DisplaySize);
+        glm::vec2 extents = ssize / scale / 2.f;
+        return glm::ortho(-extents.x + center.x, extents.x + center.x,
+                          extents.y + center.y, -extents.y + center.y);
     }
 
     glm::vec2 from_screen(ImVec2 screen) const
     {
-        ImVec2 screen_size = ImGui::GetIO().DisplaySize;
-        return glm::vec2{screen.x - screen_size.x / 2.f, screen.y - screen_size.y / 2.f} / scale + center;
+        glm::vec2 screen_size = to_glm(ImGui::GetIO().DisplaySize);
+        return (to_glm(screen) - screen_size / 2.f) / scale + center;
     }
 
     ImVec2 to_screen(glm::vec2 world) const
     {
-        ImVec2 screen_size = ImGui::GetIO().DisplaySize;
-        glm::vec2 screen = (world - center) * scale + glm::vec2{screen_size.x / 2.f, screen_size.y / 2.f};
-        return {screen.x, screen.y};
+        glm::vec2 screen_size = to_glm(ImGui::GetIO().DisplaySize);
+        glm::vec2 screen = (world - center) * scale + screen_size / 2.f;
+        return to_im(screen);
     }
 
     void save_to_file(const char *filename) const
