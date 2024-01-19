@@ -386,6 +386,8 @@ public:
                                               (type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : ""),
                                               type, severity, message); },
                                0);
+        
+        glfwSwapInterval(0);
     }
 
     ~App()
